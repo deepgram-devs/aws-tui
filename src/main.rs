@@ -1,6 +1,9 @@
 use anyhow::Result;
 use aws_config::BehaviorVersion;
 use aws_sdk_ec2::Client as Ec2Client;
+use aws_sdk_ec2::types::Tag;
+use aws_sdk_sts::Client as StsClient;
+use chrono::Utc;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -256,6 +259,89 @@ async fn terminate_instances(region: &str, instance_ids: Vec<String>) -> Result<
     Ok(format!("Terminated {} instance(s)", instance_ids.len()))
 }
 
+async fn create_ami_from_instances(region: &str, instances: &[Ec2Instance], selected_indices: &[usize]) -> Result<String> {
+    if selected_indices.is_empty() {
+        return Ok("No instances selected".to_string());
+    }
+
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .region(aws_config::Region::new(region.to_string()))
+        .load()
+        .await;
+    
+    let ec2_client = Ec2Client::new(&config);
+    let sts_client = StsClient::new(&config);
+    
+    // Get IAM identity information
+    let caller_identity = sts_client.get_caller_identity().send().await?;
+    let iam_identity = caller_identity.arn().unwrap_or("Unknown");
+    
+    // Get current system username
+    let username = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "Unknown".to_string());
+    
+    // Get current timestamp
+    let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    
+    let mut ami_ids = Vec::new();
+    
+    for &idx in selected_indices {
+        if let Some(instance) = instances.get(idx) {
+            // Create AMI name
+            let ami_name = format!("{}_AMI_{}", instance.name, timestamp);
+            
+            // Create tags for the AMI
+            let tags = vec![
+                Tag::builder()
+                    .key("SourceInstanceName")
+                    .value(&instance.name)
+                    .build(),
+                Tag::builder()
+                    .key("SourceInstanceId")
+                    .value(&instance.id)
+                    .build(),
+                Tag::builder()
+                    .key("CreatedBy")
+                    .value(&username)
+                    .build(),
+                Tag::builder()
+                    .key("CreatedAt")
+                    .value(&timestamp)
+                    .build(),
+                Tag::builder()
+                    .key("IAMIdentity")
+                    .value(iam_identity)
+                    .build(),
+            ];
+            
+            // Create the AMI
+            let response = ec2_client
+                .create_image()
+                .instance_id(&instance.id)
+                .name(&ami_name)
+                .description(format!(
+                    "AMI created from instance {} ({}) by {} at {}",
+                    instance.name, instance.id, username, timestamp
+                ))
+                .set_tag_specifications(Some(vec![
+                    aws_sdk_ec2::types::TagSpecification::builder()
+                        .resource_type(aws_sdk_ec2::types::ResourceType::Image)
+                        .set_tags(Some(tags))
+                        .build(),
+                ]))
+                .send()
+                .await?;
+            
+            if let Some(ami_id) = response.image_id() {
+                ami_ids.push(ami_id.to_string());
+            }
+        }
+    }
+    
+    Ok(format!("Created {} AMI(s): {}", ami_ids.len(), ami_ids.join(", ")))
+}
+
 fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -291,6 +377,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  s             - Start selected instances"),
             Line::from("  t             - Stop selected instances"),
             Line::from("  d             - Terminate selected instances"),
+            Line::from("  a             - Create AMI from selected instances"),
             Line::from("  c             - Clear all selections"),
             Line::from("  h             - Toggle this help"),
             Line::from("  q or Ctrl+C   - Quit"),
@@ -577,6 +664,33 @@ async fn main() -> Result<()> {
                                     }
                                     Err(e) => {
                                         app.status_message = format!("Error terminating instances: {}", e);
+                                    }
+                                }
+                            } else {
+                                app.status_message = "No instances selected".to_string();
+                            }
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        if !app.show_help {
+                            let selected_indices: Vec<usize> = app.selected_instances
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, &selected)| selected)
+                                .map(|(i, _)| i)
+                                .collect();
+                            
+                            if !selected_indices.is_empty() {
+                                app.status_message = "Creating AMI(s)...".to_string();
+                                terminal.draw(|f| ui(f, &mut app))?;
+                                
+                                match create_ami_from_instances(&app.current_region, &app.instances, &selected_indices).await {
+                                    Ok(msg) => {
+                                        app.status_message = msg;
+                                        app.clear_selections();
+                                    }
+                                    Err(e) => {
+                                        app.status_message = format!("Error creating AMI: {}", e);
                                     }
                                 }
                             } else {

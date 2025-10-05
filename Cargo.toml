@@ -1,0 +1,12 @@
+[package]
+name = "ec2-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.29.0"
+aws-config = { version = "1.8.7", features = ["behavior-version-latest"] }
+aws-sdk-ec2 = "1.171.0"
+tokio = { version = "1.47.1", features = ["full"] }
+anyhow = "1.0.100"

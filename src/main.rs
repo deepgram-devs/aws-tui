@@ -17,6 +17,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState},
     Frame, Terminal,
 };
+use regex::Regex;
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -69,6 +70,10 @@ struct App {
     log_wrap_enabled: bool,
     log: AppLog,
     is_loading: bool,
+    show_region_selector: bool,
+    region_filter: String,
+    filtered_regions: Vec<String>,
+    region_selector_index: usize,
 }
 
 impl App {
@@ -78,11 +83,34 @@ impl App {
             "us-east-2".to_string(),
             "us-west-1".to_string(),
             "us-west-2".to_string(),
-            "eu-west-1".to_string(),
-            "eu-central-1".to_string(),
+            "af-south-1".to_string(),
+            "ap-east-1".to_string(),
+            "ap-south-1".to_string(),
+            "ap-south-2".to_string(),
             "ap-southeast-1".to_string(),
+            "ap-southeast-2".to_string(),
+            "ap-southeast-3".to_string(),
+            "ap-southeast-4".to_string(),
             "ap-northeast-1".to_string(),
+            "ap-northeast-2".to_string(),
+            "ap-northeast-3".to_string(),
+            "ca-central-1".to_string(),
+            "ca-west-1".to_string(),
+            "eu-central-1".to_string(),
+            "eu-central-2".to_string(),
+            "eu-west-1".to_string(),
+            "eu-west-2".to_string(),
+            "eu-west-3".to_string(),
+            "eu-south-1".to_string(),
+            "eu-south-2".to_string(),
+            "eu-north-1".to_string(),
+            "il-central-1".to_string(),
+            "me-south-1".to_string(),
+            "me-central-1".to_string(),
+            "sa-east-1".to_string(),
         ];
+        
+        let filtered_regions = regions.clone();
         
         Self {
             instances: Vec::new(),
@@ -97,6 +125,10 @@ impl App {
             log_wrap_enabled: false,
             log,
             is_loading: false,
+            show_region_selector: false,
+            region_filter: String::new(),
+            filtered_regions,
+            region_selector_index: 0,
         }
     }
 
@@ -169,6 +201,81 @@ impl App {
 
     fn clear_selections(&mut self) {
         self.selected_instances = vec![false; self.instances.len()];
+    }
+
+    fn open_region_selector(&mut self) {
+        self.show_region_selector = true;
+        self.region_filter.clear();
+        self.filtered_regions = self.available_regions.clone();
+        self.region_selector_index = 0;
+    }
+
+    fn close_region_selector(&mut self) {
+        self.show_region_selector = false;
+        self.region_filter.clear();
+    }
+
+    fn update_region_filter(&mut self) {
+        if self.region_filter.is_empty() {
+            self.filtered_regions = self.available_regions.clone();
+        } else {
+            match Regex::new(&self.region_filter) {
+                Ok(re) => {
+                    self.filtered_regions = self.available_regions
+                        .iter()
+                        .filter(|region| re.is_match(region))
+                        .cloned()
+                        .collect();
+                }
+                Err(_) => {
+                    // If regex is invalid, treat as literal string match
+                    let filter_lower = self.region_filter.to_lowercase();
+                    self.filtered_regions = self.available_regions
+                        .iter()
+                        .filter(|region| region.to_lowercase().contains(&filter_lower))
+                        .cloned()
+                        .collect();
+                }
+            }
+        }
+        
+        // Reset index if out of bounds
+        if self.region_selector_index >= self.filtered_regions.len() && !self.filtered_regions.is_empty() {
+            self.region_selector_index = 0;
+        }
+    }
+
+    fn next_filtered_region(&mut self) {
+        if !self.filtered_regions.is_empty() {
+            self.region_selector_index = (self.region_selector_index + 1) % self.filtered_regions.len();
+        }
+    }
+
+    fn previous_filtered_region(&mut self) {
+        if !self.filtered_regions.is_empty() {
+            if self.region_selector_index == 0 {
+                self.region_selector_index = self.filtered_regions.len() - 1;
+            } else {
+                self.region_selector_index -= 1;
+            }
+        }
+    }
+
+    fn select_filtered_region(&mut self) -> Option<String> {
+        if self.region_selector_index < self.filtered_regions.len() {
+            let selected_region = self.filtered_regions[self.region_selector_index].clone();
+            
+            // Update current region and region index
+            if let Some(idx) = self.available_regions.iter().position(|r| r == &selected_region) {
+                self.region_index = idx;
+                self.current_region = selected_region.clone();
+            }
+            
+            self.close_region_selector();
+            Some(selected_region)
+        } else {
+            None
+        }
     }
 }
 
@@ -522,6 +629,90 @@ fn ui(f: &mut Frame, app: &mut App) {
             .alignment(ratatui::layout::Alignment::Center);
         
         f.render_widget(loading, loading_area);
+    } else if app.show_region_selector {
+        let selector_area = centered_rect(60, 70, f.area());
+        
+        // Create the region selector UI
+        let mut region_items: Vec<ListItem> = app.filtered_regions
+            .iter()
+            .enumerate()
+            .map(|(i, region)| {
+                let style = if i == app.region_selector_index {
+                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else if region == &app.current_region {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                
+                let prefix = if i == app.region_selector_index {
+                    ">> "
+                } else {
+                    "   "
+                };
+                
+                ListItem::new(Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(region.clone(), style),
+                ]))
+            })
+            .collect();
+        
+        // Add message if no regions match
+        if region_items.is_empty() {
+            region_items.push(ListItem::new(Line::from(vec![
+                Span::styled("No regions match the filter", Style::default().fg(Color::Red)),
+            ])));
+        }
+        
+        let title = if app.region_filter.is_empty() {
+            format!("Select Region (showing {} of {})", app.filtered_regions.len(), app.available_regions.len())
+        } else {
+            format!("Select Region - Filter: '{}' (showing {} of {})", app.region_filter, app.filtered_regions.len(), app.available_regions.len())
+        };
+        
+        let region_list = List::new(region_items)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .style(Style::default().bg(Color::Black)));
+        
+        // Split the area to add instructions at the bottom
+        let selector_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(5),
+            ])
+            .split(selector_area);
+        
+        f.render_widget(region_list, selector_chunks[0]);
+        
+        // Instructions
+        let instructions = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("↑/↓ or j/k", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Navigate  "),
+                Span::styled("Enter", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Select"),
+            ]),
+            Line::from(vec![
+                Span::styled("Type", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Filter (regex)  "),
+                Span::styled("Backspace", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Delete char"),
+            ]),
+            Line::from(vec![
+                Span::styled("Esc or g", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Cancel"),
+            ]),
+        ])
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Controls")
+            .style(Style::default().bg(Color::Black)));
+        
+        f.render_widget(instructions, selector_chunks[1]);
     } else if app.show_logs {
         let log_area = centered_rect(80, 80, f.area());
         
@@ -616,6 +807,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  ↑/↓ or j/k    - Navigate instances"),
             Line::from("  Space         - Toggle instance selection"),
             Line::from("  ←/→           - Switch regions"),
+            Line::from("  g             - Select region (with filter)"),
             Line::from("  r             - Refresh instance list"),
             Line::from("  s             - Start selected instances"),
             Line::from("  t             - Stop selected instances"),
@@ -765,10 +957,63 @@ async fn main() -> Result<()> {
                     break;
                 }
 
+                // Handle region selector input
+                if app.show_region_selector {
+                    match key.code {
+                        KeyCode::Char('g') | KeyCode::Esc => {
+                            app.close_region_selector();
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            app.next_filtered_region();
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            app.previous_filtered_region();
+                        }
+                        KeyCode::Enter => {
+                            if let Some(selected_region) = app.select_filtered_region() {
+                                app.is_loading = true;
+                                terminal.draw(|f| ui(f, &mut app))?;
+                                
+                                match load_instances(&selected_region).await {
+                                    Ok(instances) => {
+                                        app.instances = instances;
+                                        app.selected_instances = vec![false; app.instances.len()];
+                                        if !app.instances.is_empty() {
+                                            app.table_state.select(Some(0));
+                                        } else {
+                                            app.table_state.select(None);
+                                        }
+                                        app.status_message = format!("Loaded {} instances from {}", app.instances.len(), app.current_region);
+                                    }
+                                    Err(e) => {
+                                        app.status_message = format!("Error loading instances: {}", e);
+                                    }
+                                }
+                                app.is_loading = false;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            app.region_filter.pop();
+                            app.update_region_filter();
+                        }
+                        KeyCode::Char(c) => {
+                            app.region_filter.push(c);
+                            app.update_region_filter();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => {
                         log_message(&app.log, LogLevel::Info, "Application shutting down".to_string());
                         break;
+                    }
+                    KeyCode::Char('g') => {
+                        if !app.show_help && !app.is_loading {
+                            app.open_region_selector();
+                        }
                     }
                     KeyCode::Char('h') => {
                         app.show_help = !app.show_help;

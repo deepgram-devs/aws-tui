@@ -68,6 +68,7 @@ struct App {
     show_logs: bool,
     log_wrap_enabled: bool,
     log: AppLog,
+    is_loading: bool,
 }
 
 impl App {
@@ -95,6 +96,7 @@ impl App {
             show_logs: false,
             log_wrap_enabled: false,
             log,
+            is_loading: false,
         }
     }
 
@@ -497,8 +499,30 @@ fn ui(f: &mut Frame, app: &mut App) {
     .block(Block::default().borders(Borders::ALL).title("Info"));
     f.render_widget(header, chunks[0]);
 
-    // Log overlay
-    if app.show_logs {
+    // Loading overlay (highest priority)
+    if app.is_loading {
+        let loading_area = centered_rect(40, 20, f.area());
+        
+        let loading_text = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("⏳ Loading instances...", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(format!("Region: {}", app.current_region), Style::default().fg(Color::Yellow)),
+            ]),
+        ];
+        
+        let loading = Paragraph::new(loading_text)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title("Loading")
+                .style(Style::default().bg(Color::Black)))
+            .alignment(ratatui::layout::Alignment::Center);
+        
+        f.render_widget(loading, loading_area);
+    } else if app.show_logs {
         let log_area = centered_rect(80, 80, f.area());
         
         let log_entries = if let Ok(entries) = app.log.lock() {
@@ -713,7 +737,7 @@ async fn main() -> Result<()> {
     log_message(&app_log, LogLevel::Info, "EC2 TUI application started".to_string());
     
     // Load initial instances
-    app.status_message = "Loading instances...".to_string();
+    app.is_loading = true;
     terminal.draw(|f| ui(f, &mut app))?;
     
     match load_instances(&app.current_region).await {
@@ -729,6 +753,7 @@ async fn main() -> Result<()> {
             app.status_message = format!("Error loading instances: {}", e);
         }
     }
+    app.is_loading = false;
 
     // Main loop
     loop {
@@ -767,9 +792,9 @@ async fn main() -> Result<()> {
                         }
                     }
                     KeyCode::Left => {
-                        if !app.show_help {
+                        if !app.show_help && !app.is_loading {
                             app.previous_region();
-                            app.status_message = "Loading instances...".to_string();
+                            app.is_loading = true;
                             terminal.draw(|f| ui(f, &mut app))?;
                             
                             match load_instances(&app.current_region).await {
@@ -787,12 +812,13 @@ async fn main() -> Result<()> {
                                     app.status_message = format!("Error loading instances: {}", e);
                                 }
                             }
+                            app.is_loading = false;
                         }
                     }
                     KeyCode::Right => {
-                        if !app.show_help {
+                        if !app.show_help && !app.is_loading {
                             app.next_region();
-                            app.status_message = "Loading instances...".to_string();
+                            app.is_loading = true;
                             terminal.draw(|f| ui(f, &mut app))?;
                             
                             match load_instances(&app.current_region).await {
@@ -810,6 +836,7 @@ async fn main() -> Result<()> {
                                     app.status_message = format!("Error loading instances: {}", e);
                                 }
                             }
+                            app.is_loading = false;
                         }
                     }
                     KeyCode::Char(' ') => {
@@ -818,8 +845,8 @@ async fn main() -> Result<()> {
                         }
                     }
                     KeyCode::Char('r') => {
-                        if !app.show_help {
-                            app.status_message = "Refreshing instances...".to_string();
+                        if !app.show_help && !app.is_loading {
+                            app.is_loading = true;
                             terminal.draw(|f| ui(f, &mut app))?;
                             
                             match load_instances(&app.current_region).await {
@@ -835,6 +862,7 @@ async fn main() -> Result<()> {
                                     app.status_message = format!("Error refreshing instances: {}", e);
                                 }
                             }
+                            app.is_loading = false;
                         }
                     }
                     KeyCode::Char('c') => {

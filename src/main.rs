@@ -14,10 +14,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState},
     Frame, Terminal,
 };
 use std::io;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 struct Ec2Instance {
@@ -29,6 +30,32 @@ struct Ec2Instance {
     private_ip: String,
 }
 
+#[derive(Clone, Debug)]
+enum LogLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+struct LogEntry {
+    timestamp: String,
+    level: LogLevel,
+    message: String,
+}
+
+impl LogEntry {
+    fn new(level: LogLevel, message: String) -> Self {
+        Self {
+            timestamp: Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            level,
+            message,
+        }
+    }
+}
+
+type AppLog = Arc<Mutex<Vec<LogEntry>>>;
+
 struct App {
     instances: Vec<Ec2Instance>,
     selected_instances: Vec<bool>,
@@ -38,10 +65,13 @@ struct App {
     region_index: usize,
     status_message: String,
     show_help: bool,
+    show_logs: bool,
+    log_wrap_enabled: bool,
+    log: AppLog,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(log: AppLog) -> Self {
         let regions = vec![
             "us-east-1".to_string(),
             "us-east-2".to_string(),
@@ -62,6 +92,9 @@ impl App {
             region_index: 0,
             status_message: "Press 'h' for help".to_string(),
             show_help: false,
+            show_logs: false,
+            log_wrap_enabled: false,
+            log,
         }
     }
 
@@ -259,10 +292,14 @@ async fn terminate_instances(region: &str, instance_ids: Vec<String>) -> Result<
     Ok(format!("Terminated {} instance(s)", instance_ids.len()))
 }
 
-async fn create_ami_from_instances(region: &str, instances: &[Ec2Instance], selected_indices: &[usize]) -> Result<String> {
+async fn create_ami_from_instances(region: &str, instances: &[Ec2Instance], selected_indices: &[usize], log: &AppLog) -> Result<String> {
     if selected_indices.is_empty() {
-        return Ok("No instances selected".to_string());
+        let msg = "No instances selected for AMI creation".to_string();
+        log_message(log, LogLevel::Warning, msg.clone());
+        return Ok(msg);
     }
+
+    log_message(log, LogLevel::Info, format!("Starting AMI creation for {} instance(s) in region {}", selected_indices.len(), region));
 
     let config = aws_config::defaults(BehaviorVersion::latest())
         .region(aws_config::Region::new(region.to_string()))
@@ -273,13 +310,22 @@ async fn create_ami_from_instances(region: &str, instances: &[Ec2Instance], sele
     let sts_client = StsClient::new(&config);
     
     // Get IAM identity information
-    let caller_identity = sts_client.get_caller_identity().send().await?;
+    let caller_identity = match sts_client.get_caller_identity().send().await {
+        Ok(identity) => identity,
+        Err(e) => {
+            let error_msg = format!("Failed to get IAM identity: {}", e);
+            log_message(log, LogLevel::Error, error_msg.clone());
+            return Err(anyhow::anyhow!(error_msg));
+        }
+    };
     let iam_identity = caller_identity.arn().unwrap_or("Unknown");
+    log_message(log, LogLevel::Info, format!("IAM Identity: {}", iam_identity));
     
     // Get current system username
     let username = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "Unknown".to_string());
+    log_message(log, LogLevel::Info, format!("System username: {}", username));
     
     // Get current timestamp
     let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
@@ -288,8 +334,57 @@ async fn create_ami_from_instances(region: &str, instances: &[Ec2Instance], sele
     
     for &idx in selected_indices {
         if let Some(instance) = instances.get(idx) {
+            log_message(log, LogLevel::Info, format!("Processing instance: {} ({})", instance.name, instance.id));
+            
+            // Get instance details to retrieve block device mappings
+            let instance_details = match ec2_client
+                .describe_instances()
+                .instance_ids(&instance.id)
+                .send()
+                .await {
+                    Ok(details) => details,
+                    Err(e) => {
+                        let error_msg = format!("Failed to describe instance {}: {}", instance.id, e);
+                        log_message(log, LogLevel::Error, error_msg.clone());
+                        return Err(anyhow::anyhow!(error_msg));
+                    }
+                };
+            
+            // Extract block device mappings and filter out ephemeral disks
+            let mut block_device_mappings = Vec::new();
+            
+            for reservation in instance_details.reservations() {
+                for inst in reservation.instances() {
+                    if inst.instance_id() == Some(&instance.id) {
+                        for bdm in inst.block_device_mappings() {
+                            // Only include EBS volumes, exclude ephemeral disks (instance store)
+                            if bdm.ebs().is_some() {
+                                if let Some(device_name) = bdm.device_name() {
+                                    log_message(log, LogLevel::Info, format!("  Including EBS volume: {}", device_name));
+                                    
+                                    // For AMI creation, we just need to specify the device name
+                                    // AWS will automatically capture the EBS volume configuration
+                                    let block_device = aws_sdk_ec2::types::EbsBlockDevice::builder().delete_on_termination(true).build();
+                                    let mapping = aws_sdk_ec2::types::BlockDeviceMapping::builder()
+                                        .device_name(device_name)
+                                        .ebs(block_device)
+                                        .build();
+                                    block_device_mappings.push(mapping);
+                                }
+                            } else if let Some(device_name) = bdm.device_name() {
+                                log_message(log, LogLevel::Info, format!("  Excluding ephemeral disk: {}", device_name));
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            log_message(log, LogLevel::Info, format!("  Total EBS volumes to include: {}", block_device_mappings.len()));
+            
             // Create AMI name
             let ami_name = format!("{}_AMI_{}", instance.name, timestamp);
+            log_message(log, LogLevel::Info, format!("  AMI name: {}", ami_name));
             
             // Create tags for the AMI
             let tags = vec![
@@ -315,8 +410,17 @@ async fn create_ami_from_instances(region: &str, instances: &[Ec2Instance], sele
                     .build(),
             ];
             
-            // Create the AMI
-            let response = ec2_client
+            log_message(log, LogLevel::Info, format!("  AMI Configuration:"));
+            log_message(log, LogLevel::Info, format!("    - Instance ID: {}", instance.id));
+            log_message(log, LogLevel::Info, format!("    - Instance Name: {}", instance.name));
+            log_message(log, LogLevel::Info, format!("    - Instance Type: {}", instance.instance_type));
+            log_message(log, LogLevel::Info, format!("    - Region: {}", region));
+            log_message(log, LogLevel::Info, format!("    - Created By: {}", username));
+            log_message(log, LogLevel::Info, format!("    - IAM Identity: {}", iam_identity));
+            log_message(log, LogLevel::Info, format!("    - Timestamp: {}", timestamp));
+            
+            // Create the AMI with filtered block device mappings
+            let mut create_image_request = ec2_client
                 .create_image()
                 .instance_id(&instance.id)
                 .name(&ami_name)
@@ -329,17 +433,45 @@ async fn create_ami_from_instances(region: &str, instances: &[Ec2Instance], sele
                         .resource_type(aws_sdk_ec2::types::ResourceType::Image)
                         .set_tags(Some(tags))
                         .build(),
-                ]))
-                .send()
-                .await?;
+                ]));
+            
+            // Only set block device mappings if we found any EBS volumes
+            if !block_device_mappings.is_empty() {
+                create_image_request = create_image_request.set_block_device_mappings(Some(block_device_mappings));
+                log_message(log, LogLevel::Info, format!("  Added block device mappings..."));
+            }
+            
+            log_message(log, LogLevel::Info, format!("  Sending CreateImage request to AWS..."));
+            
+            let response = match create_image_request.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let error_msg = format!("Failed to create AMI for instance {}: {}", instance.id, e);
+                    log_message(log, LogLevel::Error, error_msg.clone());
+                    log_message(log, LogLevel::Error, format!("  Error details: {:?}", e));
+                    return Err(anyhow::anyhow!(error_msg));
+                }
+            };
             
             if let Some(ami_id) = response.image_id() {
+                log_message(log, LogLevel::Info, format!("  Successfully created AMI: {}", ami_id));
                 ami_ids.push(ami_id.to_string());
+            } else {
+                let error_msg = format!("AMI creation succeeded but no AMI ID returned for instance {}", instance.id);
+                log_message(log, LogLevel::Warning, error_msg);
             }
         }
     }
     
-    Ok(format!("Created {} AMI(s): {}", ami_ids.len(), ami_ids.join(", ")))
+    let success_msg = format!("Created {} AMI(s): {}", ami_ids.len(), ami_ids.join(", "));
+    log_message(log, LogLevel::Info, success_msg.clone());
+    Ok(success_msg)
+}
+
+fn log_message(log: &AppLog, level: LogLevel, message: String) {
+    if let Ok(mut log_entries) = log.lock() {
+        log_entries.push(LogEntry::new(level, message));
+    }
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
@@ -365,8 +497,95 @@ fn ui(f: &mut Frame, app: &mut App) {
     .block(Block::default().borders(Borders::ALL).title("Info"));
     f.render_widget(header, chunks[0]);
 
-    // Help overlay
-    if app.show_help {
+    // Log overlay
+    if app.show_logs {
+        let log_area = centered_rect(80, 80, f.area());
+        
+        let log_entries = if let Ok(entries) = app.log.lock() {
+            entries.iter().rev().take(100).rev().cloned().collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        
+        let log_items: Vec<ListItem> = log_entries
+            .iter()
+            .flat_map(|entry| {
+                let level_style = match entry.level {
+                    LogLevel::Info => Style::default().fg(Color::Green),
+                    LogLevel::Warning => Style::default().fg(Color::Yellow),
+                    LogLevel::Error => Style::default().fg(Color::Red),
+                };
+                
+                let level_text = match entry.level {
+                    LogLevel::Info => "INFO",
+                    LogLevel::Warning => "WARN",
+                    LogLevel::Error => "ERROR",
+                };
+                
+                let prefix = format!("[{}] {:5} ", entry.timestamp, level_text);
+                
+                if app.log_wrap_enabled {
+                    // Calculate available width for message (subtract prefix length and borders)
+                    let available_width = (log_area.width as usize).saturating_sub(prefix.len() + 4);
+                    
+                    if available_width > 0 {
+                        // Split message into chunks that fit the available width
+                        let mut lines = Vec::new();
+                        let message_chars: Vec<char> = entry.message.chars().collect();
+                        let mut start = 0;
+                        
+                        while start < message_chars.len() {
+                            let end = (start + available_width).min(message_chars.len());
+                            let chunk: String = message_chars[start..end].iter().collect();
+                            
+                            if start == 0 {
+                                // First line includes the prefix
+                                lines.push(ListItem::new(Line::from(vec![
+                                    Span::styled(format!("[{}] ", entry.timestamp), Style::default().fg(Color::DarkGray)),
+                                    Span::styled(format!("{:5} ", level_text), level_style.add_modifier(Modifier::BOLD)),
+                                    Span::raw(chunk),
+                                ])));
+                            } else {
+                                // Continuation lines are indented
+                                lines.push(ListItem::new(Line::from(vec![
+                                    Span::raw(" ".repeat(prefix.len())),
+                                    Span::raw(chunk),
+                                ])));
+                            }
+                            
+                            start = end;
+                        }
+                        lines
+                    } else {
+                        // Fallback if width calculation fails
+                        vec![ListItem::new(Line::from(vec![
+                            Span::styled(format!("[{}] ", entry.timestamp), Style::default().fg(Color::DarkGray)),
+                            Span::styled(format!("{:5} ", level_text), level_style.add_modifier(Modifier::BOLD)),
+                            Span::raw(&entry.message),
+                        ]))]
+                    }
+                } else {
+                    // No wrapping - single line
+                    vec![ListItem::new(Line::from(vec![
+                        Span::styled(format!("[{}] ", entry.timestamp), Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{:5} ", level_text), level_style.add_modifier(Modifier::BOLD)),
+                        Span::raw(&entry.message),
+                    ]))]
+                }
+            })
+            .collect();
+        
+        let wrap_status = if app.log_wrap_enabled { "ON" } else { "OFF" };
+        let title = format!("Application Logs (Press 'l' to close, 'w' to toggle wrap [{}], showing last 100 entries)", wrap_status);
+        
+        let log_list = List::new(log_items)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .style(Style::default().bg(Color::Black)));
+        
+        f.render_widget(log_list, log_area);
+    } else if app.show_help {
         let help_text = vec![
             Line::from("Keyboard Shortcuts:"),
             Line::from(""),
@@ -379,6 +598,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  d             - Terminate selected instances"),
             Line::from("  a             - Create AMI from selected instances"),
             Line::from("  c             - Clear all selections"),
+            Line::from("  l             - Toggle application logs"),
             Line::from("  h             - Toggle this help"),
             Line::from("  q or Ctrl+C   - Quit"),
         ];
@@ -444,7 +664,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         )
         .header(header)
         .block(Block::default().borders(Borders::ALL).title("EC2 Instances"))
-        .highlight_style(selected_style)
+        .row_highlight_style(selected_style)
         .highlight_symbol(">> ");
         
         f.render_stateful_widget(table, chunks[1], &mut app.table_state);
@@ -485,8 +705,12 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create app state
-    let mut app = App::new();
+    // Create app state with shared log
+    let app_log: AppLog = Arc::new(Mutex::new(Vec::new()));
+    let mut app = App::new(app_log.clone());
+    
+    // Log application startup
+    log_message(&app_log, LogLevel::Info, "EC2 TUI application started".to_string());
     
     // Load initial instances
     app.status_message = "Loading instances...".to_string();
@@ -517,9 +741,20 @@ async fn main() -> Result<()> {
                 }
 
                 match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') => {
+                        log_message(&app.log, LogLevel::Info, "Application shutting down".to_string());
+                        break;
+                    }
                     KeyCode::Char('h') => {
                         app.show_help = !app.show_help;
+                    }
+                    KeyCode::Char('l') => {
+                        app.show_logs = !app.show_logs;
+                    }
+                    KeyCode::Char('w') => {
+                        if app.show_logs {
+                            app.log_wrap_enabled = !app.log_wrap_enabled;
+                        }
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
                         if !app.show_help {
@@ -684,7 +919,7 @@ async fn main() -> Result<()> {
                                 app.status_message = "Creating AMI(s)...".to_string();
                                 terminal.draw(|f| ui(f, &mut app))?;
                                 
-                                match create_ami_from_instances(&app.current_region, &app.instances, &selected_indices).await {
+                                match create_ami_from_instances(&app.current_region, &app.instances, &selected_indices, &app.log).await {
                                     Ok(msg) => {
                                         app.status_message = msg;
                                         app.clear_selections();

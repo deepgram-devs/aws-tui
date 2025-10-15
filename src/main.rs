@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arboard::Clipboard;
 use aws_config::BehaviorVersion;
 use aws_sdk_ec2::Client as Ec2Client;
 use aws_sdk_ec2::types::Tag;
@@ -29,6 +30,7 @@ struct Ec2Instance {
     instance_type: String,
     public_ip: String,
     private_ip: String,
+    ipv6: String,
 }
 
 #[derive(Clone, Debug)]
@@ -350,6 +352,16 @@ async fn load_instances(region: &str) -> Result<Vec<Ec2Instance>> {
                 .unwrap_or("N/A")
                 .to_string();
             
+            // Get IPv6 address from network interfaces
+            let ipv6 = instance
+                .network_interfaces()
+                .iter()
+                .flat_map(|ni| ni.ipv6_addresses())
+                .next()
+                .and_then(|ipv6_addr| ipv6_addr.ipv6_address())
+                .unwrap_or("N/A")
+                .to_string();
+            
             instances.push(Ec2Instance {
                 id,
                 name,
@@ -357,6 +369,7 @@ async fn load_instances(region: &str) -> Result<Vec<Ec2Instance>> {
                 instance_type,
                 public_ip,
                 private_ip,
+                ipv6,
             });
         }
     }
@@ -830,6 +843,8 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  d             - Terminate selected instances"),
             Line::from("  a             - Create AMI from selected instances"),
             Line::from("  c             - Clear all selections"),
+            Line::from("  Ctrl+4        - Copy IPv4 address to clipboard"),
+            Line::from("  Ctrl+6        - Copy IPv6 address to clipboard"),
             Line::from("  l             - Toggle application logs"),
             Line::from("  h             - Toggle this help"),
             Line::from("  q or Ctrl+C   - Quit"),
@@ -971,6 +986,56 @@ async fn main() -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     break;
+                }
+                
+                // Handle CTRL+4 to copy IPv4 address
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('4') {
+                    if let Some(selected_idx) = app.table_state.selected() {
+                        if let Some(instance) = app.instances.get(selected_idx) {
+                            if instance.public_ip != "N/A" {
+                                match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&instance.public_ip)) {
+                                    Ok(_) => {
+                                        app.status_message = format!("Copied IPv4 address: {}", instance.public_ip);
+                                        log_message(&app.log, LogLevel::Info, format!("Copied IPv4 address {} to clipboard", instance.public_ip));
+                                    }
+                                    Err(e) => {
+                                        app.status_message = format!("Failed to copy to clipboard: {}", e);
+                                        log_message(&app.log, LogLevel::Error, format!("Clipboard error: {}", e));
+                                    }
+                                }
+                            } else {
+                                app.status_message = "No IPv4 address available for this instance".to_string();
+                            }
+                        }
+                    } else {
+                        app.status_message = "No instance selected".to_string();
+                    }
+                    continue;
+                }
+                
+                // Handle CTRL+6 to copy IPv6 address
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('6') {
+                    if let Some(selected_idx) = app.table_state.selected() {
+                        if let Some(instance) = app.instances.get(selected_idx) {
+                            if instance.ipv6 != "N/A" {
+                                match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&instance.ipv6)) {
+                                    Ok(_) => {
+                                        app.status_message = format!("Copied IPv6 address: {}", instance.ipv6);
+                                        log_message(&app.log, LogLevel::Info, format!("Copied IPv6 address {} to clipboard", instance.ipv6));
+                                    }
+                                    Err(e) => {
+                                        app.status_message = format!("Failed to copy to clipboard: {}", e);
+                                        log_message(&app.log, LogLevel::Error, format!("Clipboard error: {}", e));
+                                    }
+                                }
+                            } else {
+                                app.status_message = "No IPv6 address available for this instance".to_string();
+                            }
+                        }
+                    } else {
+                        app.status_message = "No instance selected".to_string();
+                    }
+                    continue;
                 }
 
                 // Handle region selector input

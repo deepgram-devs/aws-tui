@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame, Terminal,
 };
 use regex::Regex;
@@ -73,7 +73,7 @@ struct App {
     show_region_selector: bool,
     region_filter: String,
     filtered_regions: Vec<String>,
-    region_selector_index: usize,
+    region_selector_state: ListState,
 }
 
 impl App {
@@ -111,6 +111,8 @@ impl App {
         ];
         
         let filtered_regions = regions.clone();
+        let mut region_selector_state = ListState::default();
+        region_selector_state.select(Some(0));
         
         Self {
             instances: Vec::new(),
@@ -128,7 +130,7 @@ impl App {
             show_region_selector: false,
             region_filter: String::new(),
             filtered_regions,
-            region_selector_index: 0,
+            region_selector_state,
         }
     }
 
@@ -207,7 +209,7 @@ impl App {
         self.show_region_selector = true;
         self.region_filter.clear();
         self.filtered_regions = self.available_regions.clone();
-        self.region_selector_index = 0;
+        self.region_selector_state.select(Some(0));
     }
 
     fn close_region_selector(&mut self) {
@@ -239,43 +241,67 @@ impl App {
             }
         }
         
-        // Reset index if out of bounds
-        if self.region_selector_index >= self.filtered_regions.len() && !self.filtered_regions.is_empty() {
-            self.region_selector_index = 0;
+        // Reset selection if out of bounds
+        let current_selection = self.region_selector_state.selected().unwrap_or(0);
+        if current_selection >= self.filtered_regions.len() && !self.filtered_regions.is_empty() {
+            self.region_selector_state.select(Some(0));
+        } else if self.filtered_regions.is_empty() {
+            self.region_selector_state.select(None);
         }
     }
 
     fn next_filtered_region(&mut self) {
-        if !self.filtered_regions.is_empty() {
-            self.region_selector_index = (self.region_selector_index + 1) % self.filtered_regions.len();
+        if self.filtered_regions.is_empty() {
+            return;
         }
+        
+        let i = match self.region_selector_state.selected() {
+            Some(i) => {
+                if i >= self.filtered_regions.len() - 1 {
+                    0 // Loop back to top
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.region_selector_state.select(Some(i));
     }
 
     fn previous_filtered_region(&mut self) {
-        if !self.filtered_regions.is_empty() {
-            if self.region_selector_index == 0 {
-                self.region_selector_index = self.filtered_regions.len() - 1;
-            } else {
-                self.region_selector_index -= 1;
-            }
+        if self.filtered_regions.is_empty() {
+            return;
         }
+        
+        let i = match self.region_selector_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.filtered_regions.len() - 1 // Loop to bottom
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.region_selector_state.select(Some(i));
     }
 
     fn select_filtered_region(&mut self) -> Option<String> {
-        if self.region_selector_index < self.filtered_regions.len() {
-            let selected_region = self.filtered_regions[self.region_selector_index].clone();
-            
-            // Update current region and region index
-            if let Some(idx) = self.available_regions.iter().position(|r| r == &selected_region) {
-                self.region_index = idx;
-                self.current_region = selected_region.clone();
+        if let Some(selected_idx) = self.region_selector_state.selected() {
+            if selected_idx < self.filtered_regions.len() {
+                let selected_region = self.filtered_regions[selected_idx].clone();
+                
+                // Update current region and region index
+                if let Some(idx) = self.available_regions.iter().position(|r| r == &selected_region) {
+                    self.region_index = idx;
+                    self.current_region = selected_region.clone();
+                }
+                
+                self.close_region_selector();
+                return Some(selected_region);
             }
-            
-            self.close_region_selector();
-            Some(selected_region)
-        } else {
-            None
         }
+        None
     }
 }
 
@@ -633,37 +659,25 @@ fn ui(f: &mut Frame, app: &mut App) {
         let selector_area = centered_rect(60, 70, f.area());
         
         // Create the region selector UI
-        let mut region_items: Vec<ListItem> = app.filtered_regions
+        let selected_idx = app.region_selector_state.selected();
+        let region_items: Vec<ListItem> = app.filtered_regions
             .iter()
             .enumerate()
             .map(|(i, region)| {
-                let style = if i == app.region_selector_index {
-                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
-                } else if region == &app.current_region {
+                let is_selected = selected_idx == Some(i);
+                let is_current = region == &app.current_region;
+                
+                let style = if is_current && !is_selected {
                     Style::default().fg(Color::Yellow)
                 } else {
                     Style::default()
                 };
                 
-                let prefix = if i == app.region_selector_index {
-                    ">> "
-                } else {
-                    "   "
-                };
-                
                 ListItem::new(Line::from(vec![
-                    Span::styled(prefix, style),
                     Span::styled(region.clone(), style),
                 ]))
             })
             .collect();
-        
-        // Add message if no regions match
-        if region_items.is_empty() {
-            region_items.push(ListItem::new(Line::from(vec![
-                Span::styled("No regions match the filter", Style::default().fg(Color::Red)),
-            ])));
-        }
         
         let title = if app.region_filter.is_empty() {
             format!("Select Region (showing {} of {})", app.filtered_regions.len(), app.available_regions.len())
@@ -675,7 +689,9 @@ fn ui(f: &mut Frame, app: &mut App) {
             .block(Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .style(Style::default().bg(Color::Black)));
+                .style(Style::default().bg(Color::Black)))
+            .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .highlight_symbol(">> ");
         
         // Split the area to add instructions at the bottom
         let selector_chunks = Layout::default()
@@ -686,7 +702,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             ])
             .split(selector_area);
         
-        f.render_widget(region_list, selector_chunks[0]);
+        f.render_stateful_widget(region_list, selector_chunks[0], &mut app.region_selector_state);
         
         // Instructions
         let instructions = Paragraph::new(vec![

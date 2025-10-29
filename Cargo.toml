@@ -1,16 +1,5 @@
-[package]
-name = "ec2-tui"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-ratatui = "0.29"
-crossterm = "0.29.0"
-aws-config = { version = "1.8.8", features = ["behavior-version-latest"] }
-aws-sdk-ec2 = "1.174.0"
-aws-sdk-sts = "1.88.0"
-tokio = { version = "1.48.0", features = ["full"] }
-anyhow = "1.0.100"
-chrono = "0.4.42"
-regex = "1.12.2"
-arboard = "3.4.1"
+[workspace]
+members = [
+  "ec2-tui",
+  "efs-tui"
+]

@@ -1,0 +1,16 @@
+[package]
+name = "efs-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+arboard = "3.4"
+aws-config = { version = "1.5", features = ["behavior-version-latest"] }
+aws-sdk-efs = "1.52"
+aws-sdk-sts = "1.52"
+chrono = "0.4"
+crossterm = "0.29.0"
+ratatui = "0.29"
+regex = "1.11"
+tokio = { version = "1.41", features = ["full"] }

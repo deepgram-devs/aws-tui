@@ -1,5 +1,6 @@
 [workspace]
 members = [
   "ec2-tui",
-  "efs-tui"
+  "efs-tui",
+  "cfn-tui"
 ]

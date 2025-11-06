@@ -900,6 +900,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  s             - View stack resources"),
             Line::from("  x             - View stack exports"),
             Line::from("  t             - Copy template to clipboard"),
+            Line::from("  Cmd+C/Ctrl+C  - Copy event reason (in events view)"),
             Line::from("  Esc or b      - Back to stack list"),
             Line::from("  l             - Toggle application logs"),
             Line::from("  h             - Toggle this help"),
@@ -950,7 +951,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 let table = Table::new(
                     rows,
                     [
-                        Constraint::Length(30),
+                        Constraint::Length(38),
                         Constraint::Length(25),
                         Constraint::Length(20),
                         Constraint::Min(30),
@@ -1173,8 +1174,40 @@ async fn main() -> Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+            if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                // Handle CMD+C (macOS) or CTRL+C for copying event reason in StackEvents view
+                if (key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER)) 
+                    && key.code == KeyCode::Char('c') 
+                    && app.view_mode == ViewMode::StackEvents 
+                    && !app.show_help 
+                    && !app.show_logs 
+                    && !app.show_region_selector {
+                    
+                    if let Some(selected_idx) = app.events_scroll_state.selected() {
+                        if let Some(event) = app.stack_events.get(selected_idx) {
+                            if !event.status_reason.is_empty() {
+                                match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&event.status_reason)) {
+                                    Ok(_) => {
+                                        app.status_message = "Event reason copied to clipboard".to_string();
+                                        log_message(&app_log, LogLevel::Info, format!("Event reason copied to clipboard: {}", event.status_reason));
+                                    }
+                                    Err(e) => {
+                                        app.status_message = format!("Failed to copy to clipboard: {}", e);
+                                        log_message(&app_log, LogLevel::Error, format!("Clipboard error: {}", e));
+                                    }
+                                }
+                            } else {
+                                app.status_message = "Selected event has no reason message".to_string();
+                            }
+                        }
+                    } else {
+                        app.status_message = "No event selected".to_string();
+                    }
+                    continue;
+                }
+                
+                // Handle CTRL+C to quit (only when not in StackEvents view or no event selected)
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     break;
                 }
@@ -1468,11 +1501,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     KeyCode::Char('b') | KeyCode::Esc => {
-                        if app.show_help {
-                            app.show_help = false;
-                        } else if app.show_logs {
-                            app.show_logs = false;
-                        } else if app.view_mode != ViewMode::StackList {
+                        if app.view_mode != ViewMode::StackList {
                             app.return_to_stack_list();
                             app.status_message = "Returned to stack list".to_string();
                         }

@@ -183,6 +183,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-dynamodb"
+version = "1.96.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2e1f3871da847c7ff682ddd2c2b802fa10a562db34eaf16dd863fc2d3f72ad6"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-ec2"
 version = "1.177.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -922,6 +944,23 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "dynamodb-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "chrono",
+ "crossterm 0.29.0",
+ "ratatui",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "ec2-tui"
@@ -2300,6 +2339,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.145"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c"
+dependencies = [
+ "itoa",
+ "memchr",
+ "ryu",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

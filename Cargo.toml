@@ -2,5 +2,6 @@
 members = [
   "ec2-tui",
   "efs-tui",
-  "cfn-tui"
+  "cfn-tui",
+  "dynamodb-tui"
 ]

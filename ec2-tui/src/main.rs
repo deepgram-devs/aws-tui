@@ -31,6 +31,7 @@ struct Ec2Instance {
     public_ip: String,
     private_ip: String,
     ipv6: String,
+    tags: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +77,9 @@ struct App {
     region_filter: String,
     filtered_regions: Vec<String>,
     region_selector_state: ListState,
+    show_instance_filter: bool,
+    instance_filter: String,
+    filtered_instance_indices: Vec<usize>,
 }
 
 impl App {
@@ -133,6 +137,9 @@ impl App {
             region_filter: String::new(),
             filtered_regions,
             region_selector_state,
+            show_instance_filter: false,
+            instance_filter: String::new(),
+            filtered_instance_indices: Vec::new(),
         }
     }
 
@@ -305,6 +312,104 @@ impl App {
         }
         None
     }
+
+    fn open_instance_filter(&mut self) {
+        self.show_instance_filter = true;
+    }
+
+    fn close_instance_filter(&mut self) {
+        self.show_instance_filter = false;
+    }
+
+    fn clear_instance_filter(&mut self) {
+        self.instance_filter.clear();
+        self.filtered_instance_indices.clear();
+        self.status_message = "Filter cleared".to_string();
+    }
+
+    fn update_instance_filter(&mut self) {
+        if self.instance_filter.is_empty() {
+            self.filtered_instance_indices.clear();
+            return;
+        }
+
+        // Try to compile as regex
+        match Regex::new(&self.instance_filter) {
+            Ok(re) => {
+                self.filtered_instance_indices = self.instances
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, instance)| self.instance_matches_regex(instance, &re))
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+            Err(_) => {
+                // If regex is invalid, treat as literal string match (case-insensitive)
+                let filter_lower = self.instance_filter.to_lowercase();
+                self.filtered_instance_indices = self.instances
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, instance)| self.instance_matches_literal(instance, &filter_lower))
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+        }
+
+        // Reset table selection if current selection is not in filtered results
+        if let Some(selected) = self.table_state.selected() {
+            if !self.filtered_instance_indices.contains(&selected) && !self.filtered_instance_indices.is_empty() {
+                self.table_state.select(Some(self.filtered_instance_indices[0]));
+            }
+        }
+    }
+
+    fn instance_matches_regex(&self, instance: &Ec2Instance, re: &Regex) -> bool {
+        // Check all instance properties
+        if re.is_match(&instance.id) ||
+           re.is_match(&instance.name) ||
+           re.is_match(&instance.state) ||
+           re.is_match(&instance.instance_type) ||
+           re.is_match(&instance.public_ip) ||
+           re.is_match(&instance.private_ip) ||
+           re.is_match(&instance.ipv6) {
+            return true;
+        }
+
+        // Check all tag keys and values
+        for (key, value) in &instance.tags {
+            if re.is_match(key) || re.is_match(value) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn instance_matches_literal(&self, instance: &Ec2Instance, filter: &str) -> bool {
+        // Check all instance properties
+        if instance.id.to_lowercase().contains(filter) ||
+           instance.name.to_lowercase().contains(filter) ||
+           instance.state.to_lowercase().contains(filter) ||
+           instance.instance_type.to_lowercase().contains(filter) ||
+           instance.public_ip.to_lowercase().contains(filter) ||
+           instance.private_ip.to_lowercase().contains(filter) ||
+           instance.ipv6.to_lowercase().contains(filter) {
+            return true;
+        }
+
+        // Check all tag keys and values
+        for (key, value) in &instance.tags {
+            if key.to_lowercase().contains(filter) || value.to_lowercase().contains(filter) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_filter_active(&self) -> bool {
+        !self.instance_filter.is_empty()
+    }
 }
 
 async fn load_instances(region: &str) -> Result<Vec<Ec2Instance>> {
@@ -361,7 +466,20 @@ async fn load_instances(region: &str) -> Result<Vec<Ec2Instance>> {
                 .and_then(|ipv6_addr| ipv6_addr.ipv6_address())
                 .unwrap_or("N/A")
                 .to_string();
-            
+
+            // Collect all tags as key-value pairs
+            let tags: Vec<(String, String)> = instance
+                .tags()
+                .iter()
+                .filter_map(|tag| {
+                    if let (Some(key), Some(value)) = (tag.key(), tag.value()) {
+                        Some((key.to_string(), value.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             instances.push(Ec2Instance {
                 id,
                 name,
@@ -370,6 +488,7 @@ async fn load_instances(region: &str) -> Result<Vec<Ec2Instance>> {
                 public_ip,
                 private_ip,
                 ipv6,
+                tags,
             });
         }
     }
@@ -742,6 +861,56 @@ fn ui(f: &mut Frame, app: &mut App) {
             .style(Style::default().bg(Color::Black)));
         
         f.render_widget(instructions, selector_chunks[1]);
+    } else if app.show_instance_filter {
+        let filter_area = centered_rect(60, 30, f.area());
+
+        let filter_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .split(filter_area);
+
+        // Input box
+        let input = Paragraph::new(app.instance_filter.as_str())
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title("Filter EC2 Instances (Regex)")
+                .style(Style::default().bg(Color::Black)));
+        f.render_widget(input, filter_chunks[0]);
+
+        // Instructions
+        let match_count = if app.instance_filter.is_empty() {
+            format!("Type to filter instances by ID, name, state, type, IPs, or tags")
+        } else {
+            format!("Matching {} of {} instances", app.filtered_instance_indices.len(), app.instances.len())
+        };
+
+        let instructions = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("Enter", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Apply filter  "),
+                Span::styled("Esc", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Cancel"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl+X", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Clear filter  "),
+                Span::styled("Backspace", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Delete char"),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(match_count, Style::default().fg(Color::Yellow)),
+            ]),
+        ])
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Controls")
+            .style(Style::default().bg(Color::Black)));
+
+        f.render_widget(instructions, filter_chunks[1]);
     } else if app.show_logs {
         let log_area = centered_rect(80, 80, f.area());
         
@@ -837,6 +1006,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  Space         - Toggle instance selection"),
             Line::from("  ←/→           - Switch regions"),
             Line::from("  g             - Select region (with filter)"),
+            Line::from("  f             - Filter instances (regex search)"),
             Line::from("  r             - Refresh instance list"),
             Line::from("  s             - Start selected instances"),
             Line::from("  t             - Stop selected instances"),
@@ -845,6 +1015,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  c             - Clear all selections"),
             Line::from("  Ctrl+4        - Copy IPv4 address to clipboard"),
             Line::from("  Ctrl+6        - Copy IPv6 address to clipboard"),
+            Line::from("  Ctrl+X        - Clear active filter"),
             Line::from("  l             - Toggle application logs"),
             Line::from("  h             - Toggle this help"),
             Line::from("  q or Ctrl+C   - Quit"),
@@ -862,20 +1033,30 @@ fn ui(f: &mut Frame, app: &mut App) {
         let selected_style = Style::default()
             .bg(Color::DarkGray)
             .add_modifier(Modifier::BOLD);
-        
+
         let header_cells = ["✓", "Instance ID", "Name", "State", "Type", "Public IP", "Private IP"]
             .iter()
             .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
-        
+
         let header = Row::new(header_cells).height(1).bottom_margin(1);
-        
-        let rows = app.instances.iter().enumerate().map(|(i, inst)| {
-            let checkbox = if app.selected_instances.get(i).copied().unwrap_or(false) {
+
+        // Determine which instances to display based on filter
+        let instances_to_show: Vec<(usize, &Ec2Instance)> = if app.is_filter_active() {
+            app.filtered_instance_indices
+                .iter()
+                .filter_map(|&i| app.instances.get(i).map(|inst| (i, inst)))
+                .collect()
+        } else {
+            app.instances.iter().enumerate().collect()
+        };
+
+        let rows = instances_to_show.iter().map(|(i, inst)| {
+            let checkbox = if app.selected_instances.get(*i).copied().unwrap_or(false) {
                 "[✓]"
             } else {
                 "[ ]"
             };
-            
+
             let state_color = match inst.state.as_str() {
                 "Running" => Color::Green,
                 "Stopped" => Color::Red,
@@ -883,7 +1064,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 "Pending" => Color::Cyan,
                 _ => Color::White,
             };
-            
+
             let cells = vec![
                 Cell::from(checkbox),
                 Cell::from(inst.id.clone()),
@@ -893,10 +1074,28 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Cell::from(inst.public_ip.clone()),
                 Cell::from(inst.private_ip.clone()),
             ];
-            
+
             Row::new(cells).height(1)
         });
-        
+
+        // Customize title and border color based on filter state
+        let (title, border_color) = if app.is_filter_active() {
+            (
+                format!("EC2 Instances [FILTERED: {} of {}] - Filter: '{}'",
+                    app.filtered_instance_indices.len(),
+                    app.instances.len(),
+                    app.instance_filter),
+                Color::Magenta
+            )
+        } else {
+            ("EC2 Instances".to_string(), Color::White)
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(border_color));
+
         let table = Table::new(
             rows,
             [
@@ -910,10 +1109,10 @@ fn ui(f: &mut Frame, app: &mut App) {
             ],
         )
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("EC2 Instances"))
+        .block(block)
         .row_highlight_style(selected_style)
         .highlight_symbol(">> ");
-        
+
         f.render_stateful_widget(table, chunks[1], &mut app.table_state);
     }
 
@@ -970,6 +1169,7 @@ async fn main() -> Result<()> {
             if !app.instances.is_empty() {
                 app.table_state.select(Some(0));
             }
+            app.update_instance_filter(); // Reapply filter to new instances
             app.status_message = format!("Loaded {} instances from {}", app.instances.len(), app.current_region);
         }
         Err(e) => {
@@ -1038,6 +1238,45 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // Handle CTRL+X to clear filter
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
+                    if app.is_filter_active() {
+                        app.clear_instance_filter();
+                        log_message(&app.log, LogLevel::Info, "Instance filter cleared".to_string());
+                    }
+                    continue;
+                }
+
+                // Handle instance filter input
+                if app.show_instance_filter {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.close_instance_filter();
+                            app.status_message = "Filter cancelled".to_string();
+                        }
+                        KeyCode::Enter => {
+                            app.update_instance_filter();
+                            app.close_instance_filter();
+                            if app.is_filter_active() {
+                                app.status_message = format!("Filter applied: {} matches", app.filtered_instance_indices.len());
+                                log_message(&app.log, LogLevel::Info, format!("Applied filter '{}': {} matches", app.instance_filter, app.filtered_instance_indices.len()));
+                            } else {
+                                app.status_message = "Filter is empty".to_string();
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            app.instance_filter.pop();
+                            app.update_instance_filter();
+                        }
+                        KeyCode::Char(c) => {
+                            app.instance_filter.push(c);
+                            app.update_instance_filter();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Handle region selector input
                 if app.show_region_selector {
                     match key.code {
@@ -1064,6 +1303,7 @@ async fn main() -> Result<()> {
                                         } else {
                                             app.table_state.select(None);
                                         }
+                                        app.update_instance_filter(); // Reapply filter to new instances
                                         app.status_message = format!("Loaded {} instances from {}", app.instances.len(), app.current_region);
                                     }
                                     Err(e) => {
@@ -1094,6 +1334,12 @@ async fn main() -> Result<()> {
                     KeyCode::Char('g') => {
                         if !app.show_help && !app.is_loading {
                             app.open_region_selector();
+                        }
+                    }
+                    KeyCode::Char('f') => {
+                        if !app.show_help && !app.is_loading {
+                            app.open_instance_filter();
+                            app.status_message = "Enter filter pattern (regex)".to_string();
                         }
                     }
                     KeyCode::Char('h') => {
@@ -1132,6 +1378,7 @@ async fn main() -> Result<()> {
                                     } else {
                                         app.table_state.select(None);
                                     }
+                                    app.update_instance_filter(); // Reapply filter to new instances
                                     app.status_message = format!("Loaded {} instances from {}", app.instances.len(), app.current_region);
                                 }
                                 Err(e) => {
@@ -1156,6 +1403,7 @@ async fn main() -> Result<()> {
                                     } else {
                                         app.table_state.select(None);
                                     }
+                                    app.update_instance_filter(); // Reapply filter to new instances
                                     app.status_message = format!("Loaded {} instances from {}", app.instances.len(), app.current_region);
                                 }
                                 Err(e) => {
@@ -1182,6 +1430,7 @@ async fn main() -> Result<()> {
                                     if !app.instances.is_empty() && app.table_state.selected().is_none() {
                                         app.table_state.select(Some(0));
                                     }
+                                    app.update_instance_filter(); // Reapply filter to new instances
                                     app.status_message = format!("Refreshed {} instances from {}", app.instances.len(), app.current_region);
                                 }
                                 Err(e) => {

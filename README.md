@@ -22,3 +22,9 @@ Navigate to the specific directory and run with cargo:
 cd [project-name]
 cargo run
 ```
+
+From the project root, you can also run a specific program with this:
+
+```bash
+cargo run --bin ec2-tui
+```

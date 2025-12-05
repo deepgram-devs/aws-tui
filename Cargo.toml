@@ -5,3 +5,4 @@ members = [
   "cfn-tui",
   "dynamodb-tui"
 ]
+resolver = "2"

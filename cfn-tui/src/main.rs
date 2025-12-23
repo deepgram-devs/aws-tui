@@ -26,6 +26,7 @@ struct CfnStack {
     status: String,
     creation_time: String,
     description: String,
+    tags: Vec<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -103,6 +104,10 @@ struct App {
     region_filter: String,
     filtered_regions: Vec<String>,
     region_selector_state: ListState,
+    show_stack_filter: bool,
+    stack_filter: String,
+    stack_filter_cursor_pos: usize,
+    filtered_stack_indices: Vec<usize>,
     view_mode: ViewMode,
     stack_events: Vec<StackEventInfo>,
     events_scroll_state: ListState,
@@ -167,6 +172,10 @@ impl App {
             region_filter: String::new(),
             filtered_regions,
             region_selector_state,
+            show_stack_filter: false,
+            stack_filter: String::new(),
+            stack_filter_cursor_pos: 0,
+            filtered_stack_indices: Vec::new(),
             view_mode: ViewMode::StackList,
             stack_events: Vec::new(),
             events_scroll_state: ListState::default(),
@@ -439,6 +448,102 @@ impl App {
         self.stack_resources.clear();
         self.stack_exports.clear();
     }
+
+    fn open_stack_filter(&mut self) {
+        self.show_stack_filter = true;
+        self.stack_filter.clear();
+        self.stack_filter_cursor_pos = 0;
+        self.filtered_stack_indices.clear();
+    }
+
+    fn close_stack_filter(&mut self) {
+        self.show_stack_filter = false;
+    }
+
+    fn clear_stack_filter(&mut self) {
+        self.stack_filter.clear();
+        self.stack_filter_cursor_pos = 0;
+        self.filtered_stack_indices.clear();
+        self.status_message = "Filter cleared".to_string();
+    }
+
+    fn update_stack_filter(&mut self) {
+        if self.stack_filter.is_empty() {
+            self.filtered_stack_indices.clear();
+            return;
+        }
+
+        // Try to compile as regex
+        match Regex::new(&self.stack_filter) {
+            Ok(re) => {
+                self.filtered_stack_indices = self.stacks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, stack)| self.stack_matches_regex(stack, &re))
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+            Err(_) => {
+                // If regex is invalid, treat as literal string match (case-insensitive)
+                let filter_lower = self.stack_filter.to_lowercase();
+                self.filtered_stack_indices = self.stacks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, stack)| self.stack_matches_literal(stack, &filter_lower))
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+        }
+
+        // Reset table selection if current selection is not in filtered results
+        if let Some(selected) = self.table_state.selected() {
+            if !self.filtered_stack_indices.contains(&selected) && !self.filtered_stack_indices.is_empty() {
+                self.table_state.select(Some(self.filtered_stack_indices[0]));
+            }
+        }
+    }
+
+    fn stack_matches_regex(&self, stack: &CfnStack, re: &Regex) -> bool {
+        // Check all stack properties
+        if re.is_match(&stack.name) ||
+           re.is_match(&stack.status) ||
+           re.is_match(&stack.description) ||
+           re.is_match(&stack.creation_time) {
+            return true;
+        }
+
+        // Check all tag keys and values
+        for (key, value) in &stack.tags {
+            if re.is_match(key) || re.is_match(value) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn stack_matches_literal(&self, stack: &CfnStack, filter: &str) -> bool {
+        // Check all stack properties
+        if stack.name.to_lowercase().contains(filter) ||
+           stack.status.to_lowercase().contains(filter) ||
+           stack.description.to_lowercase().contains(filter) ||
+           stack.creation_time.to_lowercase().contains(filter) {
+            return true;
+        }
+
+        // Check all tag keys and values
+        for (key, value) in &stack.tags {
+            if key.to_lowercase().contains(filter) || value.to_lowercase().contains(filter) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_filter_active(&self) -> bool {
+        !self.stack_filter.is_empty()
+    }
 }
 
 async fn load_stacks(region: &str) -> Result<Vec<CfnStack>> {
@@ -474,11 +579,25 @@ async fn load_stacks(region: &str) -> Result<Vec<CfnStack>> {
                 .unwrap_or("N/A")
                 .to_string();
             
+            // Collect all tags as key-value pairs
+            let tags: Vec<(String, String)> = stack
+                .tags()
+                .iter()
+                .filter_map(|tag| {
+                    if let (Some(key), Some(value)) = (tag.key(), tag.value()) {
+                        Some((key.to_string(), value.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            
             stacks.push(CfnStack {
                 name,
                 status,
                 creation_time,
                 description,
+                tags,
             });
     }
     
@@ -806,6 +925,64 @@ fn ui(f: &mut Frame, app: &mut App) {
             .style(Style::default().bg(Color::Black)));
         
         f.render_widget(instructions, selector_chunks[1]);
+    } else if app.show_stack_filter {
+        let filter_area = centered_rect(60, 30, f.area());
+
+        let filter_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .split(filter_area);
+
+        // Input box with cursor
+        let display_text = if app.stack_filter_cursor_pos <= app.stack_filter.len() {
+            let mut text = app.stack_filter.clone();
+            text.insert(app.stack_filter_cursor_pos, '│');
+            text
+        } else {
+            format!("{}│", app.stack_filter)
+        };
+
+        let input = Paragraph::new(display_text)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title("Filter CloudFormation Stacks (Regex)")
+                .style(Style::default().bg(Color::Black)));
+        f.render_widget(input, filter_chunks[0]);
+
+        // Instructions
+        let match_count = if app.stack_filter.is_empty() {
+            "Type to filter stacks by name, status, description, creation time, and tags".to_string()
+        } else {
+            format!("Matching {} of {} stacks", app.filtered_stack_indices.len(), app.stacks.len())
+        };
+
+        let instructions = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("Enter", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Apply filter  "),
+                Span::styled("Esc", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Cancel"),
+            ]),
+            Line::from(vec![
+                Span::styled("Left/Right", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Navigate  "),
+                Span::styled("Backspace", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" - Delete char"),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(match_count, Style::default().fg(Color::Yellow)),
+            ]),
+        ])
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Controls")
+            .style(Style::default().bg(Color::Black)));
+
+        f.render_widget(instructions, filter_chunks[1]);
     } else if app.show_logs {
         let log_area = centered_rect(80, 80, f.area());
         
@@ -894,6 +1071,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  ↑/↓ or j/k    - Navigate items"),
             Line::from("  ←/→           - Switch regions"),
             Line::from("  g             - Select region (with filter)"),
+            Line::from("  f             - Filter stacks (regex - name, status, description, time, tags)"),
             Line::from("  r             - Refresh stack list"),
             Line::from("  d             - Delete selected stack"),
             Line::from("  e             - View stack events"),
@@ -901,6 +1079,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from("  x             - View stack exports"),
             Line::from("  t             - Copy template to clipboard"),
             Line::from("  Cmd+C/Ctrl+C  - Copy event reason (in events view)"),
+            Line::from("  Ctrl+X        - Clear active filter"),
             Line::from("  Esc or b      - Back to stack list"),
             Line::from("  l             - Toggle application logs"),
             Line::from("  h             - Toggle this help"),
@@ -927,7 +1106,17 @@ fn ui(f: &mut Frame, app: &mut App) {
                 
                 let header = Row::new(header_cells).height(1).bottom_margin(1);
                 
-                let rows = app.stacks.iter().map(|stack| {
+                // Determine which stacks to display based on filter
+                let stacks_to_show: Vec<&CfnStack> = if app.is_filter_active() {
+                    app.filtered_stack_indices
+                        .iter()
+                        .filter_map(|&i| app.stacks.get(i))
+                        .collect()
+                } else {
+                    app.stacks.iter().collect()
+                };
+                
+                let rows = stacks_to_show.iter().map(|stack| {
                     let status_color = if stack.status.contains("COMPLETE") {
                         Color::Green
                     } else if stack.status.contains("FAILED") || stack.status.contains("ROLLBACK") {
@@ -948,6 +1137,16 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Row::new(cells).height(1)
                 });
                 
+                // Customize title based on filter state
+                let title = if app.is_filter_active() {
+                    format!("CloudFormation Stacks [FILTERED: {} of {}] - Filter: '{}'",
+                        app.filtered_stack_indices.len(),
+                        app.stacks.len(),
+                        app.stack_filter)
+                } else {
+                    "CloudFormation Stacks".to_string()
+                };
+                
                 let table = Table::new(
                     rows,
                     [
@@ -958,7 +1157,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     ],
                 )
                 .header(header)
-                .block(Block::default().borders(Borders::ALL).title("CloudFormation Stacks"))
+                .block(Block::default().borders(Borders::ALL).title(title))
                 .row_highlight_style(selected_style)
                 .highlight_symbol(">> ");
                 
@@ -1262,6 +1461,54 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // Handle stack filter input
+                if app.show_stack_filter {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.close_stack_filter();
+                            app.status_message = "Filter cancelled".to_string();
+                        }
+                        KeyCode::Enter => {
+                            app.update_stack_filter();
+                            app.close_stack_filter();
+                            if app.is_filter_active() {
+                                app.status_message = format!("Filter applied: {} matches", app.filtered_stack_indices.len());
+                                log_message(&app_log, LogLevel::Info, format!("Applied filter '{}': {} matches", app.stack_filter, app.filtered_stack_indices.len()));
+                            } else {
+                                app.status_message = "Filter is empty".to_string();
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if app.stack_filter_cursor_pos > 0 {
+                                let mut chars: Vec<char> = app.stack_filter.chars().collect();
+                                chars.remove(app.stack_filter_cursor_pos - 1);
+                                app.stack_filter = chars.into_iter().collect();
+                                app.stack_filter_cursor_pos -= 1;
+                                app.update_stack_filter();
+                            }
+                        }
+                        KeyCode::Left => {
+                            if app.stack_filter_cursor_pos > 0 {
+                                app.stack_filter_cursor_pos -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if app.stack_filter_cursor_pos < app.stack_filter.len() {
+                                app.stack_filter_cursor_pos += 1;
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            let mut chars: Vec<char> = app.stack_filter.chars().collect();
+                            chars.insert(app.stack_filter_cursor_pos, c);
+                            app.stack_filter = chars.into_iter().collect();
+                            app.stack_filter_cursor_pos += 1;
+                            app.update_stack_filter();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => {
                         log_message(&app_log, LogLevel::Info, "Application shutting down".to_string());
@@ -1272,8 +1519,17 @@ async fn main() -> Result<()> {
                             app.open_region_selector();
                         }
                     }
+                    KeyCode::Char('f') => {
+                        if !app.show_help && !app.is_loading && app.view_mode == ViewMode::StackList {
+                            app.open_stack_filter();
+                            app.status_message = "Enter filter pattern (regex)".to_string();
+                        }
+                    }
                     KeyCode::Char('h') => {
                         app.show_help = !app.show_help;
+                    }
+                    KeyCode::Esc if app.show_help => {
+                        app.show_help = false;
                     }
                     KeyCode::Char('l') => {
                         app.show_logs = !app.show_logs;
@@ -1281,6 +1537,12 @@ async fn main() -> Result<()> {
                     KeyCode::Char('w') => {
                         if app.show_logs {
                             app.log_wrap_enabled = !app.log_wrap_enabled;
+                        }
+                    }
+                    KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if app.is_filter_active() {
+                            app.clear_stack_filter();
+                            log_message(&app_log, LogLevel::Info, "Stack filter cleared".to_string());
                         }
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
@@ -1501,7 +1763,9 @@ async fn main() -> Result<()> {
                         }
                     }
                     KeyCode::Char('b') | KeyCode::Esc => {
-                        if app.view_mode != ViewMode::StackList {
+                        if app.show_help {
+                            app.show_help = false;
+                        } else if app.view_mode != ViewMode::StackList {
                             app.return_to_stack_list();
                             app.status_message = "Returned to stack list".to_string();
                         }

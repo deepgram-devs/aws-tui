@@ -335,38 +335,76 @@ impl App {
         if self.instances.is_empty() {
             return;
         }
-        let i = match self.table_state.selected() {
-            Some(i) => {
-                if i >= self.instances.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
+
+        // When filter is active, navigate through filtered indices
+        if self.is_filter_active() {
+            if self.filtered_instance_indices.is_empty() {
+                return;
             }
-            None => 0,
-        };
-        self.table_state.select(Some(i));
+
+            // Selection represents position in filtered list (0, 1, 2, ...)
+            let current_pos = self.table_state.selected().unwrap_or(0);
+            let next_pos = if current_pos >= self.filtered_instance_indices.len() - 1 {
+                0 // Wrap to beginning
+            } else {
+                current_pos + 1
+            };
+
+            self.table_state.select(Some(next_pos));
+        } else {
+            // No filter active, use normal navigation
+            let i = match self.table_state.selected() {
+                Some(i) => {
+                    if i >= self.instances.len() - 1 {
+                        0
+                    } else {
+                        i + 1
+                    }
+                }
+                None => 0,
+            };
+            self.table_state.select(Some(i));
+        }
     }
 
     fn previous_instance(&mut self) {
         if self.instances.is_empty() {
             return;
         }
-        let i = match self.table_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.instances.len() - 1
-                } else {
-                    i - 1
-                }
+
+        // When filter is active, navigate through filtered indices
+        if self.is_filter_active() {
+            if self.filtered_instance_indices.is_empty() {
+                return;
             }
-            None => 0,
-        };
-        self.table_state.select(Some(i));
+
+            // Selection represents position in filtered list (0, 1, 2, ...)
+            let current_pos = self.table_state.selected().unwrap_or(0);
+            let prev_pos = if current_pos == 0 {
+                self.filtered_instance_indices.len() - 1 // Wrap to end
+            } else {
+                current_pos - 1
+            };
+
+            self.table_state.select(Some(prev_pos));
+        } else {
+            // No filter active, use normal navigation
+            let i = match self.table_state.selected() {
+                Some(i) => {
+                    if i == 0 {
+                        self.instances.len() - 1
+                    } else {
+                        i - 1
+                    }
+                }
+                None => 0,
+            };
+            self.table_state.select(Some(i));
+        }
     }
 
     fn toggle_selection(&mut self) {
-        if let Some(i) = self.table_state.selected() {
+        if let Some(i) = self.get_actual_instance_index() {
             if i < self.selected_instances.len() {
                 self.selected_instances[i] = !self.selected_instances[i];
             }
@@ -581,6 +619,18 @@ impl App {
 
     fn is_filter_active(&self) -> bool {
         !self.instance_filter.is_empty()
+    }
+
+    fn get_actual_instance_index(&self) -> Option<usize> {
+        let selected = self.table_state.selected()?;
+
+        if self.is_filter_active() {
+            // When filter is active, map the table row position to the actual instance index
+            self.filtered_instance_indices.get(selected).copied()
+        } else {
+            // No filter, the selection is the actual instance index
+            Some(selected)
+        }
     }
 
     fn open_resize_dialog(&mut self) {
@@ -1655,7 +1705,7 @@ async fn main() -> Result<()> {
                 
                 // Handle CTRL+4 to copy IPv4 address
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('4') {
-                    if let Some(selected_idx) = app.table_state.selected() {
+                    if let Some(selected_idx) = app.get_actual_instance_index() {
                         if let Some(instance) = app.instances.get(selected_idx) {
                             if instance.public_ip != "N/A" {
                                 match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&instance.public_ip)) {
@@ -1680,7 +1730,7 @@ async fn main() -> Result<()> {
                 
                 // Handle CTRL+6 to copy IPv6 address
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('6') {
-                    if let Some(selected_idx) = app.table_state.selected() {
+                    if let Some(selected_idx) = app.get_actual_instance_index() {
                         if let Some(instance) = app.instances.get(selected_idx) {
                             if instance.ipv6 != "N/A" {
                                 match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&instance.ipv6)) {
@@ -1714,7 +1764,7 @@ async fn main() -> Result<()> {
 
                 // Handle CTRL+R to resize instance
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
-                    if let Some(selected_idx) = app.table_state.selected() {
+                    if let Some(selected_idx) = app.get_actual_instance_index() {
                         if selected_idx < app.instances.len() {
                             app.open_resize_dialog();
                             app.status_message = "Select new instance type".to_string();
@@ -1740,7 +1790,7 @@ async fn main() -> Result<()> {
                         }
                         KeyCode::Enter => {
                             if let Some(new_type) = app.get_selected_resize_type() {
-                                if let Some(selected_idx) = app.table_state.selected() {
+                                if let Some(selected_idx) = app.get_actual_instance_index() {
                                     if let Some(instance) = app.instances.get(selected_idx) {
                                         let instance_id = instance.id.clone();
                                         let region = app.current_region.clone();

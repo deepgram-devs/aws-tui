@@ -1,2 +1,8 @@
 **/target
 .DS_Store
+**.log
+**.mkv
+**.mp4
+**.aac
+**.mp3
+**.mov

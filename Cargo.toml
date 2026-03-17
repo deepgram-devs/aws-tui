@@ -3,6 +3,7 @@ members = [
   "ec2-tui",
   "efs-tui",
   "cfn-tui",
-  "dynamodb-tui"
+  "dynamodb-tui",
+  "marketplace-tui"
 ]
 resolver = "2"

@@ -250,6 +250,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-marketplacecatalog"
+version = "1.96.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f92434c295b28c6cb353d13f93e4745ed183a1d70a5be9a457700da89e9332"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sso"
 version = "1.90.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1729,6 +1751,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
 dependencies = [
  "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "marketplace-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "aws-config",
+ "aws-sdk-marketplacecatalog",
+ "chrono",
+ "crossterm 0.29.0",
+ "ratatui",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
